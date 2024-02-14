@@ -1,0 +1,33 @@
+{
+  "name": "vite-plugin-jsx-to-html",
+  "version": "0.1.0",
+  "author": "Josh Kolenko",
+  "description": "Vite plugin that converts JSX to HTML",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/joshkolenko/vite-plugin-jsx-to-html.git"
+  },
+  "license": "MIT",
+  "keywords": [
+    "vite",
+    "plugin",
+    "jsx",
+    "html"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "prepublish": "npm run build",
+    "prepack": "npm run build"
+  },
+  "type": "module",
+  "main": "dist/index.js",
+  "devDependencies": {
+    "@types/node": "^20.11.16"
+  },
+  "peerDependencies": {
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "typescript": "^5.3.3",
+    "vite": "^5.0.12"
+  }
+}
