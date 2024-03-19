@@ -1,8 +1,9 @@
 import { Plugin, ResolvedConfig, UserConfig } from "vite";
-import { OutputBundle, OutputChunk, OutputAsset } from "rollup";
+import { OutputChunk, OutputAsset } from "rollup";
 
 import fs from "fs";
 import path from "path";
+import * as prettier from "prettier";
 
 const cwd = process.cwd();
 let config: ResolvedConfig;
@@ -12,23 +13,17 @@ const pluginName = "vite-plugin-jsx-to-html";
 export function jsxToHtml(): Plugin {
   return {
     name: pluginName,
-    enforce: "pre",
     config(config): UserConfig {
       const jsxFiles = fs
         .readdirSync(config.root || cwd)
         .filter(file => file.endsWith(".jsx"));
 
       return {
-        css: {
-          transformer: "lightningcss",
-        },
         build: {
           assetsDir: "",
           ssr: true,
           ssrEmitAssets: true,
           rollupOptions: {
-            external: ["react", "react-dom/server"],
-            preserveEntrySignatures: "allow-extension",
             input: Object.fromEntries(
               jsxFiles.map(file => {
                 const name = path.basename(file, ".jsx");
@@ -39,7 +34,6 @@ export function jsxToHtml(): Plugin {
               entryFileNames: "[name].js",
               assetFileNames: "[name].[ext]",
             },
-            treeshake: true,
           },
         },
       };
@@ -53,15 +47,12 @@ export function jsxToHtml(): Plugin {
 
       function formatAssetPath(dir: string, name: string, ext: string) {
         const sepRE = new RegExp(`\\${path.sep}`, "g");
-
         const formatted = path.join(dir, name + ext).replace(sepRE, "-");
 
         return pluginName + "-" + formatted;
       }
 
-      console.log(code);
       if (checkIsCSS(id)) {
-        // console.log({ path: formatAssetPath(dir, name, ".css"), code });
         this.emitFile({
           type: "asset",
           name: formatAssetPath(dir, name, ".css"),
@@ -111,11 +102,11 @@ export function jsxToHtml(): Plugin {
           const cssPaths = getPaths(cssRE);
 
           code +=
-            `export const jsxToHTMLVitePluginHtml = renderToStaticMarkup(React.createElement(${name}));\n` +
-            `export const jsxToHTMLVitePluginJs = ${JSON.stringify(
+            `export const jsxToHtmlVitePluginHtml = renderToStaticMarkup(React.createElement(${name}));\n` +
+            `export const jsxToHtmlVitePluginJs = ${JSON.stringify(
               jsPaths
             )};\n` +
-            `export const jsxToHTMLVitePluginCss = ${JSON.stringify(
+            `export const jsxToHtmlVitePluginCss = ${JSON.stringify(
               cssPaths
             )};\n`;
         }
@@ -123,55 +114,100 @@ export function jsxToHtml(): Plugin {
         return code;
       }
     },
-    async generateBundle(_, bundle) {
-      removeEmptyChunks(bundle);
+    generateBundle: {
+      order: "post",
+      async handler(_, bundle) {
+        const entryFiles = Object.entries(bundle)
+          .filter(([_, value]) => value.type === "chunk" && value.isEntry)
+          .map(([_, value]) => value) as OutputChunk[];
 
-      // console.dir(bundle, { depth: null });
+        if (!fs.existsSync(config.cacheDir)) {
+          fs.mkdirSync(config.cacheDir);
+        }
 
-      const entryFiles = Object.entries(bundle)
-        .filter(([_, value]) => value.type === "chunk" && value.isEntry)
-        .map(([_, value]) => value) as OutputChunk[];
+        const tmpDir = fs.mkdtempSync(
+          path.join(config.cacheDir, "jsx-to-html-")
+        );
 
-      const tmpDir = fs.mkdtempSync(path.join(config.cacheDir, "jsx-to-html-"));
+        fs.writeFileSync(
+          path.join(tmpDir, "package.json"),
+          JSON.stringify({ type: "module" })
+        );
 
-      fs.writeFileSync(
-        path.join(tmpDir, "package.json"),
-        JSON.stringify({ type: "module" })
-      );
+        const jsxToHtmlFilesToRemove = new Set<string>();
 
-      for await (const file of entryFiles) {
-        const { name, code } = file;
+        for await (const file of entryFiles) {
+          const { name, code } = file;
 
-        const imports = `import * as React from 'react';\nimport { renderToStaticMarkup } from 'react-dom/server';\n`;
+          const imports = `import * as React from 'react';\nimport { renderToStaticMarkup } from 'react-dom/server';\n`;
 
-        fs.writeFileSync(path.join(tmpDir, name + ".js"), imports + code);
+          fs.writeFileSync(path.join(tmpDir, name + ".js"), imports + code);
 
-        const {
-          jsxToHTMLVitePluginHtml: html,
-          jsxToHTMLVitePluginJs: js,
-          jsxToHTMLVitePluginCss: css,
-        } = await import(path.join(tmpDir, name + ".js"));
+          const {
+            jsxToHtmlVitePluginHtml: html,
+            jsxToHtmlVitePluginJs: jsFiles,
+            jsxToHtmlVitePluginCss: cssFiles,
+          } = await import(path.join(tmpDir, name + ".js"));
 
-        console.log({ html, js, css });
-      }
+          let js = "";
+          let css = "";
+
+          for await (const file of jsFiles) {
+            const asset = bundle[file] as OutputAsset;
+            fs.writeFileSync(path.join(tmpDir, file + ".js"), asset.source);
+
+            const { default: module } = await import(
+              path.join(tmpDir, file + ".js")
+            );
+
+            if (typeof module !== "function") {
+              this.error(`The default export of inlined js must be a function`);
+            }
+
+            js += "\n(" + module.toString() + ")();\n";
+
+            jsxToHtmlFilesToRemove.add(file);
+          }
+
+          for await (const file of cssFiles) {
+            const asset = bundle[file] as OutputAsset;
+            css += "\n\n" + asset.source;
+
+            jsxToHtmlFilesToRemove.add(file);
+          }
+
+          this.emitFile({
+            type: "prebuilt-chunk",
+            code: await prettier.format(
+              html +
+                "\n\n<style>\n" +
+                css.trim() +
+                "\n</style>" +
+                "\n\n<script>\n" +
+                js +
+                "\n</script>",
+              {
+                parser: "html",
+              }
+            ),
+            fileName: name + ".html",
+          });
+        }
+
+        jsxToHtmlFilesToRemove.forEach(file => {
+          delete bundle[file];
+        });
+
+        Object.keys(bundle).forEach(key => {
+          if (!key.endsWith(".html")) {
+            delete bundle[key];
+          }
+        });
+
+        fs.rmSync(tmpDir, { recursive: true });
+      },
     },
   };
-}
-
-function removeEmptyChunks(bundle: OutputBundle) {
-  for (const [id, chunk] of Object.entries(bundle)) {
-    if (chunk.type === "chunk" && chunk.code.trim() === "") {
-      delete bundle[id];
-
-      Object.entries(bundle).forEach(([key, value]) => {
-        if (value.type === "chunk" && value.code.includes(id)) {
-          const importRE = new RegExp(`['"]${id}['"]`, "g");
-        }
-      });
-    }
-  }
-
-
 }
 
 function checkIsCSS(id: string) {
