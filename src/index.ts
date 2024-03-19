@@ -1,52 +1,43 @@
-import { Plugin, ResolvedConfig, UserConfig } from 'vite';
-import { OutputChunk, OutputAsset } from 'rollup';
+import { Plugin, ResolvedConfig, UserConfig } from "vite";
+import { OutputBundle, OutputChunk, OutputAsset } from "rollup";
 
-import fs from 'fs';
-import path from 'path';
-
-interface OutputFile extends OutputChunk {
-  html?: string;
-  css?: string;
-}
-
-function checkIsCss(file: string) {
-  return (
-    file.endsWith('.css') ||
-    file.endsWith('.scss') ||
-    file.endsWith('.sass') ||
-    file.endsWith('.less') ||
-    file.endsWith('.styl') ||
-    file.endsWith('.stylus')
-  );
-}
+import fs from "fs";
+import path from "path";
 
 const cwd = process.cwd();
-
 let config: ResolvedConfig;
-export default function jsxToHtml(): Plugin {
+
+const pluginName = "vite-plugin-jsx-to-html";
+
+export function jsxToHtml(): Plugin {
   return {
-    name: 'vite-plugin-jsx-to-html',
+    name: pluginName,
+    enforce: "pre",
     config(config): UserConfig {
       const jsxFiles = fs
         .readdirSync(config.root || cwd)
-        .filter(file => file.endsWith('.jsx'));
+        .filter(file => file.endsWith(".jsx"));
 
       return {
+        css: {
+          transformer: "lightningcss",
+        },
         build: {
-          assetsDir: '',
-          emptyOutDir: true,
-          cssCodeSplit: true,
+          assetsDir: "",
           ssr: true,
           ssrEmitAssets: true,
           rollupOptions: {
+            external: ["react", "react-dom/server"],
+            preserveEntrySignatures: "allow-extension",
             input: Object.fromEntries(
               jsxFiles.map(file => {
-                const name = path.basename(file, '.jsx');
+                const name = path.basename(file, ".jsx");
                 return [name, path.join(config.root || cwd, file)];
               })
             ),
             output: {
-              assetFileNames: '[name].[ext]',
+              entryFileNames: "[name].js",
+              assetFileNames: "[name].[ext]",
             },
             treeshake: true,
           },
@@ -56,152 +47,134 @@ export default function jsxToHtml(): Plugin {
     configResolved(viteConfig: ResolvedConfig) {
       config = viteConfig;
     },
-    load(id) {
-      if (id.endsWith('.js')) {
-        if (Array.from(this.getModuleIds()).includes(id + 'x')) {
-          this.error(
-            `Cannot have a .js file with the same name as a .jsx file in the same directory. Please rename the file "${path.basename(
-              id
-            )}" to something else.`
-          );
-        }
-      }
-    },
     async transform(code, id) {
-      const isJSX = id.endsWith('.jsx') === true;
+      const relativePath = path.relative(config.root || cwd, id);
+      const { dir, name, ext } = path.parse(relativePath);
 
-      if (isJSX) {
-        const match = code.match(
-          new RegExp('export default function (.+)\\(\\)')
+      function formatAssetPath(dir: string, name: string, ext: string) {
+        const sepRE = new RegExp(`\\${path.sep}`, "g");
+
+        const formatted = path.join(dir, name + ext).replace(sepRE, "-");
+
+        return pluginName + "-" + formatted;
+      }
+
+      console.log(code);
+      if (checkIsCSS(id)) {
+        // console.log({ path: formatAssetPath(dir, name, ".css"), code });
+        this.emitFile({
+          type: "asset",
+          name: formatAssetPath(dir, name, ".css"),
+          source: code,
+        });
+      }
+
+      if (ext === ".js") {
+        this.emitFile({
+          type: "asset",
+          name: formatAssetPath(dir, name, ".js"),
+          source: code,
+        });
+      }
+
+      if (ext === ".jsx") {
+        const exportMatch = code.match(
+          /export\sdefault\s(?:function\s)?(.+?)(?:\(\)|$)/
         );
 
-        if (match) {
-          const component = match[1];
+        if (exportMatch) {
+          const name = exportMatch[1];
 
-          const sideEffectMatches = Array.from(
-            code.matchAll(new RegExp('import [\'"](.+js)[\'"]', 'g'))
-          );
+          function getPaths(re: RegExp) {
+            const matches = code.matchAll(re);
+            return (
+              Array.from(matches).map(match => {
+                const { dir, name } = path.parse(match[1]);
+                let ext = path.extname(match[1]);
 
-          const sideEffectFiles: string[] = [];
+                if (checkIsCSS(match[1])) {
+                  ext = ".css";
+                } else if (!ext) {
+                  ext = ".js";
+                }
 
-          for await (const match of sideEffectMatches) {
-            sideEffectFiles.push(
-              (
-                await import(path.join(path.dirname(id), match[1]))
-              ).default.toString()
+                return formatAssetPath(dir, name, ext);
+              }) || []
             );
           }
 
-          const header = `
-            import React from 'react';
-            import ReactDOMServer from 'react-dom/server';
-          `;
+          const jsRE = /import\s['"](.[^.]+?|.+?.js)['"].+$/gm;
+          const cssRE =
+            /import\s['"](.+(?:\.css|\.scss|\.sass|\.less|\.styl|\.stylus))['"].+$/gm;
 
-          const footer = `
-            const jsxToHtmlRenderedHTML = ReactDOMServer.renderToStaticMarkup(
-              React.createElement(${component})
-            );
+          const jsPaths = getPaths(jsRE);
+          const cssPaths = getPaths(cssRE);
 
-            const jsxToHtmlRenderedSideEffects = ${JSON.stringify(
-              sideEffectFiles
-            )};
-
-            export {
-              jsxToHtmlRenderedHTML as html,
-              jsxToHtmlRenderedSideEffects as scripts
-            }
-          `;
-
-          code = `${header.trim()}\n${code.trim()}\n${footer.trim()}`;
+          code +=
+            `export const jsxToHTMLVitePluginHtml = renderToStaticMarkup(React.createElement(${name}));\n` +
+            `export const jsxToHTMLVitePluginJs = ${JSON.stringify(
+              jsPaths
+            )};\n` +
+            `export const jsxToHTMLVitePluginCss = ${JSON.stringify(
+              cssPaths
+            )};\n`;
         }
-      }
 
-      return {
-        code,
-      };
+        return code;
+      }
     },
     async generateBundle(_, bundle) {
-      // console.log(bundle);
+      removeEmptyChunks(bundle);
 
-      const bundleObjs = Object.keys(bundle).map(key => {
-        const obj = bundle[key];
-        delete bundle[key];
-        return obj;
-      });
+      // console.dir(bundle, { depth: null });
 
-      const assets = bundleObjs.filter(
-        obj => obj.type === 'asset'
-      ) as OutputAsset[];
+      const entryFiles = Object.entries(bundle)
+        .filter(([_, value]) => value.type === "chunk" && value.isEntry)
+        .map(([_, value]) => value) as OutputChunk[];
 
-      const chunks = bundleObjs.filter(
-        obj => obj.type === 'chunk'
-      ) as OutputChunk[];
-
-      if (!fs.existsSync(config.cacheDir)) {
-        fs.mkdirSync(config.cacheDir);
-      }
-
-      const tmpDir = fs.mkdtempSync(path.join(config.cacheDir, 'jsx-to-html-'));
-
-      chunks.forEach(chunk => {
-        if (chunk.hasOwnProperty('code')) {
-          fs.writeFileSync(path.join(tmpDir, chunk.fileName), chunk.code);
-        }
-      });
+      const tmpDir = fs.mkdtempSync(path.join(config.cacheDir, "jsx-to-html-"));
 
       fs.writeFileSync(
-        path.join(tmpDir, 'package.json'),
-        JSON.stringify({ type: 'module' })
+        path.join(tmpDir, "package.json"),
+        JSON.stringify({ type: "module" })
       );
 
-      const outputFiles: OutputFile[] = [];
+      for await (const file of entryFiles) {
+        const { name, code } = file;
 
-      for await (const chunk of chunks) {
-        const { html, scripts }: { html: string; scripts: string[] } =
-          await import(path.join(tmpDir, chunk.fileName));
+        const imports = `import * as React from 'react';\nimport { renderToStaticMarkup } from 'react-dom/server';\n`;
 
-        let script = '',
-          style = '';
+        fs.writeFileSync(path.join(tmpDir, name + ".js"), imports + code);
 
-        if (scripts.length) {
-          script = `\n<script>\n${scripts
-            .map(script => `(${script})()`)
-            .join('\n')}\n</script>`;
-        }
-        console.log(chunk);
+        const {
+          jsxToHTMLVitePluginHtml: html,
+          jsxToHTMLVitePluginJs: js,
+          jsxToHTMLVitePluginCss: css,
+        } = await import(path.join(tmpDir, name + ".js"));
 
-        const styles = assets
-          .filter(asset => {
-            if (!checkIsCss(asset.fileName)) return false;
-            const chunkStyles = chunk.moduleIds.filter(checkIsCss);
-
-            return chunkStyles
-              .map(file => path.parse(file).name)
-              .includes(path.parse(asset.fileName).name);
-          })
-          .map(asset => asset.source);
-
-        if (styles.length) {
-          style = `\n<style>${styles.join('\n')}</style>`;
-        }
-
-        outputFiles.push({
-          ...chunk,
-          html: html + script + style,
-        });
+        console.log({ html, js, css });
       }
-
-      // console.log(outputFiles);
-
-      // fs.rmSync(tmpDir, { recursive: true });
-
-      outputFiles.forEach(file => {
-        this.emitFile({
-          fileName: file.name + '.html',
-          code: file.html || '',
-          type: 'prebuilt-chunk',
-        });
-      });
     },
   };
+}
+
+function removeEmptyChunks(bundle: OutputBundle) {
+  for (const [id, chunk] of Object.entries(bundle)) {
+    if (chunk.type === "chunk" && chunk.code.trim() === "") {
+      delete bundle[id];
+
+      Object.entries(bundle).forEach(([key, value]) => {
+        if (value.type === "chunk" && value.code.includes(id)) {
+          const importRE = new RegExp(`['"]${id}['"]`, "g");
+        }
+      });
+    }
+  }
+
+
+}
+
+function checkIsCSS(id: string) {
+  const extensions = [".css", ".scss", ".sass", ".less", ".styl", ".stylus"];
+  return extensions.some(ext => id.endsWith(ext));
 }
