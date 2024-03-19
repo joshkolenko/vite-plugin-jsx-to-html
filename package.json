@@ -22,7 +22,9 @@
   "type": "module",
   "main": "dist/index.js",
   "devDependencies": {
-    "@types/node": "^20.11.16"
+    "@types/node": "^20.11.16",
+    "prettier": "^3.2.5",
+    "sass": "^1.72.0"
   },
   "peerDependencies": {
     "react": "^18.2.0",
